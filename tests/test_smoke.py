@@ -1,4 +1,6 @@
 import math
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,8 +8,9 @@ import unittest
 import torch
 
 from pipe_surrogate_demo.data import make_synthetic_pipe_data
+from pipe_surrogate_demo.list_task_sets import group_task_sets, main as list_task_sets_main
 from pipe_surrogate_demo.loss import TaskwiseMSELoss
-from pipe_surrogate_demo.schema import PipeSchema, all_task_sets
+from pipe_surrogate_demo.schema import TARGET_NAMES, PipeSchema, all_task_sets
 from pipe_surrogate_demo.train import DemoConfig, _write_outputs, train_demo
 
 
@@ -29,6 +32,21 @@ class DemoSmokeTest(unittest.TestCase):
         self.assertEqual(sum(len(task_set) == 1 for task_set in task_sets), 5)
         self.assertEqual(sum(2 <= len(task_set) <= 4 for task_set in task_sets), 25)
         self.assertEqual(sum(len(task_set) == 5 for task_set in task_sets), 1)
+
+    def test_task_listing_prints_all_31_combinations(self) -> None:
+        groups = group_task_sets()
+        self.assertEqual(
+            [len(groups[name]) for name in ("STL", "Selective", "Full")],
+            [5, 25, 1],
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            list_task_sets_main()
+        lines = output.getvalue().splitlines()
+        combinations = [line for line in lines if line in TARGET_NAMES or "+" in line]
+        self.assertEqual(len(combinations), 31)
+        self.assertIn("Rate+Depth+Vel", combinations)
+        self.assertIn("Rate+Depth+Vel+Vol", combinations)
 
     def test_selected_tasks_change_prediction_width(self) -> None:
         config = DemoConfig(
