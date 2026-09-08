@@ -1,0 +1,16 @@
+{
+  "history": 6,
+  "horizon": 6,
+  "paper_links": 396,
+  "input_channels": [
+    "Rainfall",
+    "Cumulative",
+    "Length",
+    "Diameter",
+    "Slope",
+    "InletNode_InvertElev",
+    "OutletNode_InvertElev"
+  ],
+  "targets": ["Rate", "Depth", "Vel", "Vol", "Cap"],
+  "demo_data": "synthetic and generated at runtime"
+}

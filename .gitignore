@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.py[cod]
+*.egg-info/
+outputs/
+*.pth
+*.pt
+*.ckpt
+data/raw/
+data/checkpoints/
