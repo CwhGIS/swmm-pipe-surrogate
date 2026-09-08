@@ -12,5 +12,13 @@
     "OutletNode_InvertElev"
   ],
   "targets": ["Rate", "Depth", "Vel", "Vol", "Cap"],
+  "target_labels": {
+    "Rate": "flow rate",
+    "Depth": "flow depth",
+    "Vel": "flow velocity",
+    "Vol": "flow volume",
+    "Cap": "SWMM link capacity (dimensionless)"
+  },
+  "non_empty_task_sets": 31,
   "demo_data": "synthetic and generated at runtime"
 }

@@ -15,8 +15,9 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from .data import SyntheticPipeDataset, make_ring_support
+from .loss import TaskwiseMSELoss
 from .model import GraphWaveNetDemo, ModelConfig
-from .schema import PipeSchema
+from .schema import TARGET_NAMES, PipeSchema, normalize_tasks
 
 
 def seed_everything(seed: int) -> None:
@@ -33,16 +34,15 @@ def seed_everything(seed: int) -> None:
 def _evaluate(
     model: nn.Module,
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
-    support: torch.Tensor,
-    device: torch.device,
+    context: "EpochContext",
 ) -> float:
     model.eval()
-    loss_fn = nn.MSELoss()
     losses: list[float] = []
     with torch.no_grad():
         for x, y in loader:
-            prediction = model(x.to(device), support)
-            losses.append(float(loss_fn(prediction, y.to(device)).item()))
+            prediction = model(x.to(context.device), context.support)
+            target = y[..., list(context.target_indices)].to(context.device)
+            losses.append(float(context.loss_fn(prediction, target).item()))
     return float(np.mean(losses))
 
 
@@ -69,7 +69,7 @@ def _make_loaders(
 
 
 def _make_model(
-    schema: PipeSchema, device_name: str
+    schema: PipeSchema, target_count: int, device_name: str
 ) -> tuple[GraphWaveNetDemo, torch.Tensor, torch.device]:
     """Create the model and fixed synthetic ring support."""
     device = torch.device(device_name)
@@ -79,7 +79,7 @@ def _make_model(
     model = GraphWaveNetDemo(
         ModelConfig(
             input_channels=schema.input_channels,
-            target_channels=schema.target_channels,
+            target_channels=target_count,
             horizon=schema.horizon,
         )
     ).to(device)
@@ -94,6 +94,17 @@ class EpochContext:
     device: torch.device
     optimizer: torch.optim.Optimizer
     loss_fn: nn.Module
+    target_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class FitResult:
+    """Validation-selected training artifacts for one task subset."""
+
+    history: list[dict[str, float]]
+    best_val_loss: float
+    best_epoch: int
+    state_dict: dict[str, torch.Tensor]
 
 
 def _train_epoch(
@@ -107,7 +118,8 @@ def _train_epoch(
     for x, y in loader:
         context.optimizer.zero_grad(set_to_none=True)
         prediction = model(x.to(context.device), context.support)
-        loss = context.loss_fn(prediction, y.to(context.device))
+        target = y[..., list(context.target_indices)].to(context.device)
+        loss = context.loss_fn(prediction, target)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         context.optimizer.step()
@@ -115,18 +127,63 @@ def _train_epoch(
     return float(np.mean(losses))
 
 
+def _snapshot_state(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Return a CPU copy that can be saved without retaining a live model."""
+    return {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+    }
+
+
+def _fit(
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    context: EpochContext,
+    epochs: int,
+) -> FitResult:
+    """Train for a fixed number of epochs and keep the best validation state."""
+    history: list[dict[str, float]] = []
+    best_val_loss = float("inf")
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
+    for epoch in range(1, epochs + 1):
+        train_loss = _train_epoch(model, train_loader, context)
+        val_loss = _evaluate(model, val_loader, context)
+        history.append(
+            {"epoch": float(epoch), "train_loss": train_loss, "val_loss": val_loss}
+        )
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            best_state = _snapshot_state(model)
+        print(f"epoch={epoch:02d} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+    if best_state is None:
+        raise RuntimeError("training did not produce a validation checkpoint")
+    return FitResult(history, best_val_loss, best_epoch, best_state)
+
+
 def _write_outputs(
-    config: "DemoConfig", result: dict[str, Any], model: nn.Module
+    config: "DemoConfig",
+    result: dict[str, Any],
+    state_dict: dict[str, torch.Tensor],
 ) -> None:
     """Write opt-in demo artifacts below the requested output directory."""
     if config.output_dir is None:
         return
     destination = Path(config.output_dir)
+    if destination.exists():
+        if not destination.is_dir():
+            raise FileExistsError(f"refusing to replace existing file: {destination}")
+        if any(destination.iterdir()):
+            raise FileExistsError(
+                f"refusing to write into non-empty output directory: {destination}"
+            )
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "metrics.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
     )
-    torch.save(model.state_dict(), destination / "demo_model.pth")
+    torch.save(state_dict, destination / "demo_model.pth")
 
 
 @dataclass(frozen=True)
@@ -140,6 +197,7 @@ class DemoConfig:
     seed: int = 3407
     device: str = "cpu"
     output_dir: str | Path | None = "outputs/demo"
+    tasks: tuple[str, ...] = TARGET_NAMES
 
 
 def train_demo(config: DemoConfig | None = None) -> dict[str, Any]:
@@ -148,35 +206,47 @@ def train_demo(config: DemoConfig | None = None) -> dict[str, Any]:
     if config.epochs < 1 or config.batch_size < 1:
         raise ValueError("epochs and batch_size must be positive")
     seed_everything(config.seed)
+    selected_tasks = normalize_tasks(config.tasks)
+    target_indices = tuple(TARGET_NAMES.index(name) for name in selected_tasks)
     schema = PipeSchema(links=config.links)
     dataset = SyntheticPipeDataset.build(
         samples=config.samples, schema=schema, seed=config.seed
     )
     train_loader, val_loader = _make_loaders(config, dataset)
-    model, support, run_device = _make_model(schema, config.device)
+    model, support, run_device = _make_model(
+        schema, len(selected_tasks), config.device
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    loss_fn = nn.MSELoss()
-    context = EpochContext(support, run_device, optimizer, loss_fn)
-    history: list[dict[str, float]] = []
-
-    for epoch in range(1, config.epochs + 1):
-        train_loss = _train_epoch(model, train_loader, context)
-        val_loss = _evaluate(model, val_loader, context.support, context.device)
-        history.append({"epoch": float(epoch), "train_loss": train_loss, "val_loss": val_loss})
-        print(f"epoch={epoch:02d} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
-
+    loss_fn = TaskwiseMSELoss()
+    context = EpochContext(support, run_device, optimizer, loss_fn, target_indices)
+    fit_result = _fit(
+        model,
+        train_loader,
+        val_loader,
+        context,
+        config.epochs,
+    )
     result: dict[str, Any] = {
         "seed": config.seed,
         "device": str(run_device),
+        "tasks": list(selected_tasks),
+        "checkpoint_selection": "lowest_validation_loss",
+        "best_epoch": fit_result.best_epoch,
         "schema": {
             "x": [config.samples, schema.history, schema.links, schema.input_channels],
             "y": [config.samples, schema.horizon, schema.links, schema.target_channels],
+            "prediction": [
+                config.samples,
+                schema.horizon,
+                schema.links,
+                len(selected_tasks),
+            ],
         },
-        "history": history,
-        "best_val_loss": min(item["val_loss"] for item in history),
+        "history": fit_result.history,
+        "best_val_loss": fit_result.best_val_loss,
         "demo_only": True,
     }
-    _write_outputs(config, result, model)
+    _write_outputs(config, result, fit_result.state_dict)
     return result
 
 
@@ -189,6 +259,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     parser.add_argument("--output-dir", default="outputs/demo")
+    parser.add_argument(
+        "--tasks",
+        nargs="+",
+        choices=TARGET_NAMES,
+        default=list(TARGET_NAMES),
+        help="selected target subset; defaults to all five targets",
+    )
     return parser.parse_args()
 
 

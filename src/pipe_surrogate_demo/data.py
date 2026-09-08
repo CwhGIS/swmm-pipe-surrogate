@@ -30,18 +30,33 @@ def make_synthetic_pipe_data(
     """Create deterministic toy tensors with the real Pipe tensor layout.
 
     Returns ``X`` with shape ``(samples, history, links, 7)`` and ``Y`` with
-    shape ``(samples, horizon, links, 5)``.  The values are synthetic and are
-    not intended to reproduce the paper's SWMM results.
+    shape ``(samples, horizon, links, 5)``. Rainfall is dynamic and shared
+    across links, cumulative rainfall is its time cumulative, and the five
+    geometric channels are fixed per link and broadcast over each sample and
+    history. The values are synthetic and do not reproduce paper results.
     """
     if samples < 2:
         raise ValueError("samples must be at least 2")
     schema.validate()
     rng = np.random.default_rng(seed)
-    x = rng.normal(
-        0.0,
-        1.0,
-        size=(samples, schema.history, schema.links, schema.input_channels),
+    rainfall = rng.uniform(
+        0.0, 1.0, size=(samples, schema.history, 1, 1)
     ).astype(np.float32)
+    cumulative = np.cumsum(rainfall, axis=1)
+    static_attributes = rng.normal(
+        0.0, 1.0, size=(schema.links, 5)
+    ).astype(np.float32)
+    static_attributes = np.broadcast_to(
+        static_attributes[None, None, :, :],
+        (samples, schema.history, schema.links, 5),
+    )
+    rainfall = np.broadcast_to(
+        rainfall, (samples, schema.history, schema.links, 1)
+    )
+    cumulative = np.broadcast_to(
+        cumulative, (samples, schema.history, schema.links, 1)
+    )
+    x = np.concatenate((rainfall, cumulative, static_attributes), axis=-1).copy()
     link_position = np.linspace(-1.0, 1.0, schema.links, dtype=np.float32)
     rainfall_last = x[:, -1, :, 0:1]
     cumulative_last = x[:, -1, :, 1:2]

@@ -8,9 +8,13 @@ network, filesystem-data, or checkpoint-download side effects.
 
 ## Scientific contract
 
-- Input semantics match the Pipe schema: seven channels, six historical time
-  steps, and one value per link.
-- Output semantics match the Pipe schema: five targets over six horizons.
+- Input tensor layout and channel order match the Pipe schema: seven channels,
+  six historical time steps, and one value per link.
+- Output tensor layout and target-channel order match the Pipe schema: five
+  targets over six horizons.
+- Synthetic rainfall is dynamic and shared across links; cumulative rainfall is
+  its history-wise cumulative; geometric channels are fixed per link and
+  broadcast over samples and history.
 - The default graph has 12 synthetic links; the paper graph has 396 links.
 - Synthetic values are generated deterministically and are not paper results.
 
@@ -29,6 +33,12 @@ The model is intentionally smaller than the archived production training code.
 It demonstrates the data contract and execution path without bundling the
 study's checkpoints or raw SWMM outputs.
 
+The synthetic ring support is a graph fixture only; it does not reproduce the
+directed conduit topology used by the study. The demo supports all 31 non-empty
+target subsets and uses an unweighted sum of per-task MSE values. It selects the
+checkpoint with the lowest validation loss, but it does not implement the
+paper's preprocessing, inverse scaling, or paper-level evaluation export.
+
 ## Design decisions
 
 | Decision | Rationale |
@@ -39,6 +49,9 @@ study's checkpoints or raw SWMM outputs.
 | `num_workers=0` | Avoids platform-specific multiprocessing failures in a demo. |
 | No `torch.load` of external files | Avoids untrusted checkpoint deserialization. |
 | Output directory is explicit | Keeps generated artifacts out of source control. |
+| Non-empty output directories are rejected | Prevents accidental checkpoint overwrite. |
+| Task subset is explicit | Makes the 31 non-empty composition space inspectable. |
+| Best validation checkpoint | Mirrors the paper's checkpoint-selection principle. |
 | Fixed seed and deterministic cuDNN flags | Makes smoke results reproducible. |
 
 ## Security boundary
@@ -51,11 +64,12 @@ must validate paths, shapes, finite values, and file provenance before use.
 ## Known limitations
 
 - The synthetic generator is not a SWMM simulator.
-- The compact model is not the exact archived 31-combination production model.
+- The compact model is not the exact archived 31-combination production model;
+  only the task-set enumeration and loss principle are demonstrated.
 - No uncertainty calibration, inverse scaling, or paper-level metric export is
   included here.
 - Author-approved license, citation metadata, and pinned environment versions
-  remain release tasks before public publication.
+  remain release tasks for a formal archival snapshot.
 
 ## Change history
 
@@ -64,3 +78,10 @@ must validate paths, shapes, finite values, and file provenance before use.
 Created an isolated Pipe schema, synthetic fixture, compact model, deterministic
 training CLI, smoke test, and release documentation. No canonical paper files
 were modified.
+
+### 2026-09-08 — Method-correspondence layer
+
+Added explicit target-subset enumeration, task-wise summed MSE, static/dynamic
+synthetic channel semantics, validation-checkpoint selection, target mapping,
+and paper/demo correspondence documentation. The public boundary remains
+synthetic-only.
